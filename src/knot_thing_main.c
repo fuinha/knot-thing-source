@@ -17,6 +17,7 @@
 #include "knot_types.h"
 #include "knot_thing_main.h"
 
+#include "include/log.h"
 // TODO: normalize all returning error codes
 
 #define KNOT_THING_EMPTY_ITEM		"EMPTY ITEM"
@@ -24,6 +25,11 @@
 /* Keeps track of max data_items index were there is a sensor/actuator stored */
 static uint8_t max_sensor_id;
 static uint8_t evt_sensor_id;
+
+/* Control the upper lower mensage flow */
+static uint8_t lower_flag[KNOT_THING_DATA_MAX];
+static uint8_t upper_flag[KNOT_THING_DATA_MAX];
+
 
 static struct _data_items{
 	// schema values
@@ -71,6 +77,9 @@ static void reset_data_items(void)
 		/* As "functions" is a union, we need just to set only one of its members */
 		pdata->functions.int_f.read			= NULL;
 		pdata->functions.int_f.write			= NULL;
+
+		lower_flag[count] = 0;
+		upper_flag[count] = 0;
 	}
 }
 
@@ -228,6 +237,7 @@ static int data_item_read(uint8_t sensor_id, knot_msg_data *data)
 	* TODO: This verification is alredy done at verify_events, maybe
 	* doesn`t need to do it again.
 	*/
+	hal_log_info("sensor_id: %d", sensor_id);
 	if ((sensor_id >= KNOT_THING_DATA_MAX) || item_is_unregistered(sensor_id) == 0)
 		return -1;
 
@@ -344,6 +354,9 @@ int verify_events(knot_msg_data *data)
 	 * For all registered data items: verify if value
 	 * changed according to the events registered.
 	 */
+	hal_log_info("evt_sensor_id: %d", evt_sensor_id);
+	hal_log_info("UPPER: %d", upper_flag[evt_sensor_id]);
+	hal_log_info("LOWER: %d", lower_flag[evt_sensor_id]);
 
 	if (evt_sensor_id >= KNOT_THING_DATA_MAX) {
 		evt_sensor_id = 0;
@@ -381,11 +394,22 @@ int verify_events(knot_msg_data *data)
 
 	} else if (data_items[evt_sensor_id].value_type == KNOT_VALUE_TYPE_INT) {
 		// TODO: add multiplier to comparison
-
-		if (data->payload.values.val_i.value < data_items[evt_sensor_id].config.lower_limit.val_i.value)
+		// TODO: bouncing between lower/upper and band. (add timer or threshold)
+		if (data->payload.values.val_i.value < data_items[evt_sensor_id].config.lower_limit.val_i.value && lower_flag[evt_sensor_id] == 0) {
 			comparison |= (KNOT_EVT_FLAG_LOWER_THRESHOLD & data_items[evt_sensor_id].config.event_flags);
-		else if (data->payload.values.val_i.value > data_items[evt_sensor_id].config.upper_limit.val_i.value)
+			upper_flag[evt_sensor_id] = 0;
+			lower_flag[evt_sensor_id] = 1;
+		} else if (data->payload.values.val_i.value > data_items[evt_sensor_id].config.upper_limit.val_i.value && upper_flag[evt_sensor_id] == 0) {
 			comparison |= (KNOT_EVT_FLAG_UPPER_THRESHOLD & data_items[evt_sensor_id].config.event_flags);
+			upper_flag[evt_sensor_id] = 1;
+			lower_flag[evt_sensor_id] = 0;
+		} else {
+			if (data->payload.values.val_i.value < data_items[evt_sensor_id].config.upper_limit.val_i.value)
+				upper_flag[evt_sensor_id] = 0;
+			if (data->payload.values.val_i.value > data_items[evt_sensor_id].config.lower_limit.val_i.value)
+				lower_flag[evt_sensor_id] = 0;
+		}
+
 		if (data->payload.values.val_i.value != data_items[evt_sensor_id].last_data.val_i.value)
 			comparison |= (KNOT_EVT_FLAG_CHANGE & data_items[evt_sensor_id].config.event_flags);
 
@@ -393,12 +417,21 @@ int verify_events(knot_msg_data *data)
 		data_items[evt_sensor_id].last_data.val_i.multiplier = data->payload.values.val_i.multiplier;
 	} else if (data_items[evt_sensor_id].value_type == KNOT_VALUE_TYPE_FLOAT) {
 		// TODO: add multiplier and decimal part to comparison
-		if (data->payload.values.val_f.value_int <
-						data_items[evt_sensor_id].config.lower_limit.val_f.value_int)
+		// TODO: bouncing between lower/upper and band. (add timer or threshold)
+		if (data->payload.values.val_f.value_int < data_items[evt_sensor_id].config.lower_limit.val_f.value_int && lower_flag[evt_sensor_id] == 0) {
 			comparison |= (KNOT_EVT_FLAG_LOWER_THRESHOLD & data_items[evt_sensor_id].config.event_flags);
-		else if (data->payload.values.val_f.value_int >
-						data_items[evt_sensor_id].config.upper_limit.val_f.value_int)
+			upper_flag[evt_sensor_id] = 0;
+			lower_flag[evt_sensor_id] = 1;
+		} else if (data->payload.values.val_f.value_int > data_items[evt_sensor_id].config.upper_limit.val_f.value_int && upper_flag[evt_sensor_id] == 0) {
 			comparison |= (KNOT_EVT_FLAG_UPPER_THRESHOLD & data_items[evt_sensor_id].config.event_flags);
+			upper_flag[evt_sensor_id] = 1;
+			lower_flag[evt_sensor_id] = 0;
+		} else {
+			if (data->payload.values.val_i.value < data_items[evt_sensor_id].config.upper_limit.val_i.value)
+				upper_flag[evt_sensor_id] = 0;
+			if (data->payload.values.val_i.value > data_items[evt_sensor_id].config.lower_limit.val_i.value)
+				lower_flag[evt_sensor_id] = 0;
+		}
 		if (data->payload.values.val_f.value_int != data_items[evt_sensor_id].last_data.val_f.value_int)
 			comparison |= (KNOT_EVT_FLAG_CHANGE & data_items[evt_sensor_id].config.event_flags);
 
@@ -443,7 +476,7 @@ int verify_events(knot_msg_data *data)
 int8_t knot_thing_init(const char *thing_name)
 {
 	reset_data_items();
-
+	hal_log_open("serial0");
 	return knot_thing_protocol_init(thing_name, data_item_read,
 				data_item_write, knot_thing_create_schema,
 				knot_thing_config_data_item, verify_events);
